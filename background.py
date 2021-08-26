@@ -2,6 +2,7 @@ import config as cfg
 
 import pandas as pd
 import numpy as np
+import pickle
 
 from matplotlib import pyplot as plt
 from astropy.wcs import WCS
@@ -12,10 +13,27 @@ from astropy.io import fits
 from astropy import units as u
 from photutils import CircularAperture
 from photutils import aperture_photometry
+from photutils.segmentation import deblend_sources
+from astropy.convolution import Gaussian2DKernel
+from astropy.stats import gaussian_fwhm_to_sigma
+from photutils.segmentation import detect_sources, detect_threshold
  
+
+from constants import FIELDS, WCS_MEMORY
 
 gds = pd.read_pickle(f'{cfg.CANDELS_FOLDER}/gs_complete.pk')
 
+cats = ['/home/ppxlf2/CANDELS/PANDAS/cos_complete.pk',
+        '/home/ppxlf2/CANDELS/PANDAS/egs_complete.pk',
+        '/home/ppxlf2/CANDELS/PANDAS/uds_complete.pk',
+        '/home/ppxlf2/CANDELS/PANDAS/gn_complete.pk',
+        '/home/ppxlf2/CANDELS/PANDAS/gs_complete.pk']
+
+sources_dfs = {}
+for i, field in enumerate(FIELDS):
+    sources_dfs[field] = pd.read_pickle(cats[i])
+
+"""
 field606 = fits.open(f'{cfg.CANDELS_FOLDER}/hlsp_candels_hst_acs_gs-tot_f606w_v1.0_drz.fits', memmap=True)
 field814 = fits.open(f'{cfg.CANDELS_FOLDER}/hlsp_candels_hst_acs_gs-tot_f814w_v1.0_drz.fits.1', memmap=True)
 field125 = fits.open(f'{cfg.CANDELS_FOLDER}/hlsp_candels_hst_wfc3_gs-tot_f125w_v1.0_drz.fits', memmap=True)
@@ -40,24 +58,29 @@ RAs = gds.RA.values*u.degree
 DECs = gds.DEC.values*u.degree
 
 source_coords = SkyCoord(ra=RAs, dec=DECs)
+"""
 
-def _find_bg_section(bgs, imgs):
+def _find_bg_section(bgs, output_size, position=None):
     
-    a, b = bgs[0].shape
-    c, d = imgs[0].shape
-
-    if((c <= a) & (d <= b)):
-        x = np.random.randint(0, a-c)
-        y = np.random.randint(0, b-d)
-        #print(x, y)
+    a, b = bgs.shape
+    c, d = output_size
+    c = int(c)
+    d = int(d)
+    if position is None:
+        if((c <= a) & (d <= b)):
+            x = np.random.randint(0, a-c)
+            y = np.random.randint(0, b-d)
+            #print(x, y)
+        else:
+            raise(IndexError('Galaxy Image larger than BG'))
     else:
-        raise(IndexError('Galaxy Image larger than BG'))
-    
-    bgs_section = [bg[x:(x+c), y:(y+d)] for bg in bgs]
+        x, y = position
 
-    return bgs_section
+    bgs_section = bgs[x:(x+c), y:(y+d)]
 
+    return bgs_section, (x, y)
 
+#@profile
 def find_bg_section_from_CANDELS(size, bg_coord=None, field='COSMOS'):
     
     
@@ -132,6 +155,70 @@ def find_bg_section_from_CANDELS(size, bg_coord=None, field='COSMOS'):
     return bg_sections, bg_coord
 
 
+from astropy.stats import gaussian_fwhm_to_sigma
+
+
+def search_input_position(cutout):
+
+    sigma = 3.0 * gaussian_fwhm_to_sigma 
+    kernel = Gaussian2DKernel(sigma, x_size=3, y_size=3)
+    kernel.normalize()
+    threshold = detect_threshold(cutout.data, nsigma=2.)
+    segm = detect_sources(cutout.data, threshold, npixels=5, filter_kernel=kernel)
+
+    segm_deblend = deblend_sources(cutout.data, segm, npixels=5,
+                                filter_kernel=kernel, nlevels=5,
+                                contrast=0.001)
+
+    idx = np.random.choice(np.arange(len((np.where(segm_deblend.data==0)[0]))), 1)
+    x = np.where(segm_deblend.data==0)[0][idx][0]
+    y = np.where(segm_deblend.data==0)[0][idx][0]
+
+    return cutout.wcs.pixel_to_world(x, y)
+
+def find_CANDELS_sky_patch(bands, field):
+
+    looking_for_input = True
+    while looking_for_input:
+
+        skypatches = []
+        input_coord = None
+        try:
+            sources = sources_dfs[field]
+            source = sources.iloc[np.random.randint(0, sources.shape[0])]
+            coord = SkyCoord(ra=source.RA * u.deg, dec=source.DEC* u.deg)
+            
+            for band, filter in zip(bands, FIELDS[field]):
+
+                #gal_img = fits.getdata(f'/data/captain/MERGERS/SKIRT/TNG50-1/PMxSF/TESTS/{filter}/30_100453_oct_1.fits')
+
+                wcs  = WCS_MEMORY[field][filter]#header = fits.getheader(f'/home/ppxlf2/CANDELS/{field}/{FIELDS[field][filter]["fits_filename"]}.fits')
+                data = FIELDS[field][filter]['data']#fits.getdata(f'/home/ppxlf2/CANDELS/{field}/{FIELDS[field][filter]["fits_filename"]}.fits', memmap=True)
+                
+                #wcs = WCS(header)
+                #wcs.sip = None
+
+                if input_coord is None:
+
+                    cutout = Cutout2D(data, position=coord, size=512, wcs=wcs)
+
+                    if np.all(cutout.data == 0):
+                        raise ValueError('Empty Patch of the Sky')
+
+                    input_coord = search_input_position(cutout)
+
+
+                cutout = Cutout2D(data, position=input_coord, size=256, wcs=wcs)
+
+                skypatches.append(cutout.data)
+        except ValueError as e:
+            print(e)
+            continue
+        
+        break
+
+    return skypatches, field, input_coord
+    
     
 def find_background_sky_patch(broadbands):
     if cfg.bg_mode == 'CLEAN':
@@ -140,12 +227,12 @@ def find_background_sky_patch(broadbands):
     elif cfg.bg_mode == 'FIELD':
         bg_coord = None
         if cfg.pre_loaded_coords:
-            coords = np.load('coords.npy', allow_pickle=True)
-            bg_coord = coords[np.random.randint(1000)]
+            coords = np.load('good_coords.npy', allow_pickle=True)
+            bg_coord = coords[np.random.randint(len(coords))]
     
         sizes = []
         for b in broadbands:
-            sizes.append(broadbands[0].shape[0]*2)
+            sizes.append(b.shape[0])
 
         bg_sections, coord = find_bg_section_from_CANDELS(sizes, bg_coord=bg_coord, field=cfg.bg_field)
     else:

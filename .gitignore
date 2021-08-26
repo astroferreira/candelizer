@@ -1,3 +1,4 @@
+*.txt
 *.py~
 *.pyc
 __pycache__/*

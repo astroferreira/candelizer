@@ -151,3 +151,39 @@ def skybg_iterative(data, max_iter=100, old_med=0, old_mad=0 ):
     else:
         mask = (data < skymed + 3.*skymad)
         return skybg_iterative(data[mask], max_iter-1, skymed, skymad)
+
+def dict_to_hdu(primary, dict, hdrs):
+
+    hdul = [primary]
+    for band in list(dict.keys()):
+        
+        stacked = np.dstack([dict[band]['final'],
+                                dict[band]['clean'], 
+                                dict[band]['bg'], 
+                                dict[band]['segmap'],
+                                dict[band]['clean_segmap'],
+                                dict[band]['overlap_segmap']])
+
+        hdul.append(fits.ImageHDU(stacked, header=hdrs[band]))
+
+    return fits.HDUList(hdul)
+
+import config as cfg
+def config_to_header(hdr):
+
+    hdr['F_RFRAME'] = str(cfg.restframe)
+    hdr['F_SHOTN'] = str(cfg.shotnoise)
+    hdr['F_BG'] = str(cfg.bg)
+    hdr['F_CONV'] = str(cfg.convolve)
+    hdr['F_ZSCALE'] = str(cfg.zscale)
+    hdr['F_FSCALE'] = str(cfg.fix_scaling)
+    hdr['F_BGMODE'] = cfg.bg_mode
+
+    hdr['FA_h'] = float(cfg.areia_config.h)
+    hdr['FA_DIM'] = str(cfg.areia_config.dimming)
+    hdr['FA_SCORR'] = str(cfg.areia_config.size_correction)
+    hdr['FA_ZEVO'] = str(cfg.areia_config.size_correction)
+    hdr['FA_OSIZE'] = int(cfg.areia_config.output_size)
+
+    return hdr
+    
